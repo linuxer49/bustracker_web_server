@@ -15,17 +15,33 @@ app = FastAPI()
 async def receive_location(request: Request):
     data = await request.json()
 
-    # Extract values from Traccar / dummy input
-    bus_id = data.get("bus_id")  # Later: map IMEI → bus_id
+    # Extract IMEI/uniqueId from Traccar
+    imei = data.get("uniqueId") or data.get("imei") \
+           or (data.get("attributes", {}).get("uniqueId"))
     lat = data.get("latitude")
     lon = data.get("longitude")
     speed = data.get("speed", 0)
 
-    if not (bus_id and lat and lon):
-        return {"error": "Missing required fields"}
+    if not (imei and lat and lon):
+        return {"error": "Missing required fields", "received": data}
 
-    # Insert into Supabase REST API
     async with httpx.AsyncClient() as client:
+        # 1) Find bus by IMEI
+        bus_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/buses",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            params={"imei": f"eq.{imei}"}
+        )
+
+        if bus_resp.status_code != 200 or not bus_resp.json():
+            return {"error": "Bus not found for IMEI", "imei": imei}
+
+        bus_id = bus_resp.json()[0]["id"]
+
+        # 2) Insert into bus_locations
         resp = await client.post(
             f"{SUPABASE_URL}/rest/v1/bus_locations",
             headers={
@@ -45,4 +61,4 @@ async def receive_location(request: Request):
     if resp.status_code not in [200, 201]:
         return {"error": "Supabase insert failed", "details": resp.text}
 
-    return {"status": "ok", "bus_id": bus_id}
+    return {"status": "ok", "bus_id": bus_id, "imei": imei}
