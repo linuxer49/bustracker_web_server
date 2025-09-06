@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, HTTPException
 import httpx
 import os
 from dotenv import load_dotenv
@@ -12,53 +12,71 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 app = FastAPI()
 
 @app.post("/traccar")
-async def receive_location(request: Request):
-    data = await request.json()
+async def receive_location(
+    device_id: str = Form(...),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    speed: float = Form(0)
+):
+    # 1️⃣ Validate inputs
+    if not device_id:
+        raise HTTPException(status_code=400, detail="Missing device_id")
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=400, detail="Missing latitude or longitude")
 
-    # Extract IMEI/uniqueId from Traccar
-    imei = data.get("uniqueId") or data.get("imei") \
-           or (data.get("attributes", {}).get("uniqueId"))
-    lat = data.get("latitude")
-    lon = data.get("longitude")
-    speed = data.get("speed", 0)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # 2️⃣ Find bus by device_id
+            bus_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/buses",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                },
+                params={"device_id": f"eq.{device_id}"}
+            )
 
-    if not (imei and lat and lon):
-        return {"error": "Missing required fields", "received": data}
+            if bus_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=bus_resp.status_code,
+                    detail=f"Failed to fetch bus info: {bus_resp.text}"
+                )
 
-    async with httpx.AsyncClient() as client:
-        # 1) Find bus by IMEI
-        bus_resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/buses",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-            },
-            params={"imei": f"eq.{imei}"}
-        )
+            buses = bus_resp.json()
+            if not buses:
+                raise HTTPException(status_code=404, detail=f"No bus found for device_id {device_id}")
 
-        if bus_resp.status_code != 200 or not bus_resp.json():
-            return {"error": "Bus not found for IMEI", "imei": imei}
+            bus_id = buses[0]["id"]
 
-        bus_id = bus_resp.json()[0]["id"]
+            # 3️⃣ Insert location into Supabase
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/bus_locations",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "bus_id": bus_id,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "speed": speed,
+                    "recorded_at": datetime.utcnow().isoformat()
+                }
+            )
 
-        # 2) Insert into bus_locations
-        resp = await client.post(
-            f"{SUPABASE_URL}/rest/v1/bus_locations",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "bus_id": bus_id,
-                "latitude": lat,
-                "longitude": lon,
-                "speed": speed,
-                "recorded_at": datetime.utcnow().isoformat()
-            }
-        )
+            if resp.status_code not in [200, 201]:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"Failed to insert location: {resp.text}"
+                )
 
-    if resp.status_code not in [200, 201]:
-        return {"error": "Supabase insert failed", "details": resp.text}
+    except httpx.RequestError as e:
+        # Network or timeout issues
+        raise HTTPException(status_code=503, detail=f"HTTP request error: {str(e)}")
+    except Exception as e:
+        # Catch-all for unexpected errors
+        raise HTTPException(status_code=500, detail=f"Unexpected server error: {str(e)}")
 
-    return {"status": "ok", "bus_id": bus_id, "imei": imei}
+    # 4️⃣ Success
+    return {"status": "ok", "bus_id": bus_id, "device_id": device_id}
