@@ -1,24 +1,23 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Query
 from datetime import datetime
 
 app = FastAPI()
 
 @app.post("/traccar")
+@app.get("/traccar")  # Traccar can use GET or POST
 async def receive_location(
-    device_id: str = Form(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
-    speed: float = Form(0)
+    deviceid: str = Query(...),   # Traccar sends "deviceid"
+    lat: float = Query(...),      # Traccar sends "lat"
+    lon: float = Query(...),      # Traccar sends "lon"
+    speed: float = Query(0)
 ):
-    # For now just print and return the data
     data = {
-        "device_id": device_id,
-        "latitude": latitude,
-        "longitude": longitude,
+        "device_id": deviceid,
+        "latitude": lat,
+        "longitude": lon,
         "speed": speed,
         "received_at": datetime.utcnow().isoformat()
     }
 
     print("Received:", data)
-
     return {"status": "ok", "data": data}
